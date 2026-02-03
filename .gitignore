@@ -1,0 +1,16 @@
+#ignore all files
+*
+
+#unignore all directoires
+!*/
+
+#reignore unnecessary directories
+.vscode
+build
+
+#unignore specified files
+!*.cpp
+!*.h
+!*.txt
+!*.md
+!.gitignore
