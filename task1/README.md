@@ -12,7 +12,7 @@ cmake -S . -B build -DUSE_DOUBLE=ON   # double
 cmake -S . -B build -DUSE_DOUBLE=OFF  # float
 ```
 
-При неуказании `USE_DOUBLE` по-умолчанию используется тип `double`.
+При неуказании `USE_DOUBLE` по-умолчанию используется тип `float`.
 
 ## Вывод программы
 
