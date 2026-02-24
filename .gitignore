@@ -4,13 +4,14 @@
 #unignore all directoires
 !*/
 
-#reignore unnecessary directories
+#ignore unnecessary directories
 .vscode
 build
 
 #unignore specified files
 !*.cpp
 !*.h
+!*.c
 !*.txt
 !*.md
 !.gitignore
