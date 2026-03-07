@@ -12,6 +12,10 @@ build
 !*.cpp
 !*.h
 !*.c
+!*.py
 !*.txt
+!*.csv
+!*.png
+!*.pdf
 !*.md
 !.gitignore
