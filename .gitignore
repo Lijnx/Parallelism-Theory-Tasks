@@ -19,6 +19,7 @@ build
 !*.h
 !*.c
 !*.py
+!*.ipynb
 !*.txt
 !*.csv
 !*.png

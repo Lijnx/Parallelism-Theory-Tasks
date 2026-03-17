@@ -5,5 +5,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(OpenMP)
 
-add_executable(slae slae.cpp)
-target_link_libraries(slae PRIVATE OpenMP::OpenMP_CXX)
+add_executable(slae_section slae_section.cpp)
+target_link_libraries(slae_section PRIVATE OpenMP::OpenMP_CXX)
+
+add_executable(slae_schedule slae_schedule.cpp)
+target_link_libraries(slae_schedule PRIVATE OpenMP::OpenMP_CXX)

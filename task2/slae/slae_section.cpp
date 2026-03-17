@@ -126,6 +126,70 @@ void slae_multiple_blocks(
     }
 }
 
+void slae_single_block_static(
+    const std::vector<double>& a, 
+    std::vector<double>& x, 
+    const std::vector<double>& b, 
+    int n,
+    double t, 
+    double e,
+    int chunk_size
+) {
+
+    std::vector<double> x_new(n);
+    double b_norm = 0.0;
+    double norm_sq = 0.0;
+    bool done = false;
+
+    #pragma omp parallel
+    {
+
+        #pragma omp for schedule(static, k) reduction(+:b_norm)
+        for (int i = 0; i < n; ++i) {
+            b_norm += b[i] * b[i];
+        }
+
+        #pragma omp single
+        {
+            b_norm = std::sqrt(b_norm);
+        }
+        #pragma omp barrier
+
+        while (!done) {
+
+            #pragma omp single
+            {
+                norm_sq = 0.0;
+            }
+
+            #pragma omp for schedule(static, k) reduction(+:norm_sq)
+            for (int i = 0; i < n; ++i) {
+
+                const double* row = &a[i * n];
+                double Ax_i = 0.0;
+                for (int j = 0; j < n; ++j) {
+                    Ax_i += row[j] * x[j];
+                }
+
+                double ri = Ax_i - b[i];
+                x_new[i] = x[i] - t * ri;
+                norm_sq += ri * ri;
+            }
+
+            #pragma omp for schedule(static, k)
+            for (int i = 0; i < n; ++i) {
+                x[i] = x_new[i];
+            }
+
+            #pragma omp single
+            {
+                double norm = std::sqrt(norm_sq);
+                done = (norm / b_norm < e);
+            }
+            #pragma omp barrier
+        }
+    }
+}
 
 double run_parallel(int n, Slae slae) {
 
