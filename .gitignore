@@ -7,6 +7,12 @@
 #ignore unnecessary directories
 .vscode
 build
+.venv
+
+#uv
+!pyproject.toml
+!.python-version
+!uv.lock
 
 #unignore specified files
 !*.cpp

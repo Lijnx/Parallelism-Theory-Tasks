@@ -1,102 +1,154 @@
-
 #include <fstream>
-#include <iomanip>
 #include <vector>
 #include <chrono>
 #include <cmath>
-#include <algorithm>
-#include <numeric>
 #include <omp.h>
 
-size_t idx(size_t i, size_t j, size_t cols) {
-    return i * cols + j;
-}
 
-void slae_iter_omp(
+using Slae = void (*)(
+    const std::vector<double>&, 
+    std::vector<double>&, 
+    const std::vector<double>&, 
+    int, 
+    double, 
+    double
+);
+
+
+void slae_single_block(
     const std::vector<double>& a, 
     std::vector<double>& x, 
     const std::vector<double>& b, 
-    size_t n,
-    double t, double e,
-    int nthreads = omp_get_num_threads()
+    int n,
+    double t, 
+    double e
 ) {
 
+    std::vector<double> x_new(n);
     double b_norm = 0.0;
-    #pragma omp parallel num_threads(nthreads)
-    {
-        // int nthreads = omp_get_num_threads();
-        int threadid = omp_get_thread_num();
-        int items_per_thread = n / nthreads;
-        int lb = threadid * items_per_thread;
-        int ub = (threadid == nthreads - 1) ? (n - 1) : (lb + items_per_thread - 1);
+    double norm_sq = 0.0;
+    bool done = false;
 
-        double norm_chunk = 0.0;
-        for (size_t i = lb; i <= ub; ++i) {
-            norm_chunk += b[i] * b[i];
+    #pragma omp parallel
+    {
+
+        #pragma omp for reduction(+:b_norm)
+        for (int i = 0; i < n; ++i) {
+            b_norm += b[i] * b[i];
         }
 
-        #pragma omp atomic
-        b_norm += norm_chunk;
-    }
-    b_norm = sqrt(b_norm);
-
-    double norm;
-    do {
-        norm = 0.0;
-        #pragma omp parallel num_threads(nthreads)
+        #pragma omp single
         {
-            // int nthreads = omp_get_num_threads();
-            int threadid = omp_get_thread_num();
-            int items_per_thread = n / nthreads;
-            int lb = threadid * items_per_thread;
-            int ub = (threadid == nthreads - 1) ? (n - 1) : (lb + items_per_thread - 1);
+            b_norm = std::sqrt(b_norm);
+        }
+        #pragma omp barrier
 
-            double norm_chunk = 0.0;
-            for (size_t i = lb; i <= ub; ++i) {
-                double Ax_i = 0.0;
-                for (size_t j = 0; j < n; ++j) {
-                    Ax_i += a[idx(i,j,n)] * x[j];
-                }
-                x[i] -= t * (Ax_i - b[i]);
-                norm_chunk += (Ax_i - b[i]) * (Ax_i - b[i]);
+        while (!done) {
+
+            #pragma omp single
+            {
+                norm_sq = 0.0;
             }
 
-            #pragma omp atomic
-            norm += norm_chunk;
-        }
-    } while (norm / b_norm >= e);
+            #pragma omp for reduction(+:norm_sq)
+            for (int i = 0; i < n; ++i) {
 
+                const double* row = &a[i * n];
+                double Ax_i = 0.0;
+                for (int j = 0; j < n; ++j) {
+                    Ax_i += row[j] * x[j];
+                }
+
+                double ri = Ax_i - b[i];
+                x_new[i] = x[i] - t * ri;
+                norm_sq += ri * ri;
+            }
+
+            #pragma omp for
+            for (int i = 0; i < n; ++i) {
+                x[i] = x_new[i];
+            }
+
+            #pragma omp single
+            {
+                double norm = std::sqrt(norm_sq);
+                done = (norm / b_norm < e);
+            }
+            #pragma omp barrier
+        }
+    }
 }
 
-double run_parallel(size_t n, int threads_num) {
+
+void slae_multiple_blocks(
+    const std::vector<double>& a, 
+    std::vector<double>& x, 
+    const std::vector<double>& b, 
+    int n,
+    double t, 
+    double e
+) {
+
+    std::vector<double> x_new(n);
+    double b_norm = 0.0;
+    bool done = false;
+
+    #pragma omp parallel for reduction(+:b_norm)
+    for (int i = 0; i < n; ++i) {
+        b_norm += b[i] * b[i];
+    }
+    b_norm = std::sqrt(b_norm);
+
+    while (!done) {
+        double norm_sq = 0.0;
+
+        #pragma omp parallel for reduction(+:norm_sq)
+        for (int i = 0; i < n; ++i) {
+
+            const double* row = &a[i * n];
+            double Ax_i = 0.0;
+            for (int j = 0; j < n; ++j) {
+                Ax_i += row[j] * x[j];
+            }
+
+            double ri = Ax_i - b[i];
+            x_new[i] = x[i] - t * ri;
+            norm_sq += ri * ri;
+        }
+
+        #pragma omp parallel for
+        for (int i = 0; i < n; ++i) {
+            x[i] = x_new[i];
+        }
+
+        double norm = std::sqrt(norm_sq);
+        done = (norm / b_norm < e);
+    }
+}
+
+
+double run_parallel(int n, Slae slae) {
 
     std::vector<double> a(n * n);
     std::vector<double> x(n);
     std::vector<double> b(n);
-    double t = 0.01;
+    double t = 1.0e-5;
     double e = 1.0e-5;
 
-    #pragma omp parallel
-    {
-        int nthreads = omp_get_num_threads();
-        int threadid = omp_get_thread_num();
-        int items_per_thread = n / nthreads;
-        int lb = threadid * items_per_thread;
-        int ub = (threadid == nthreads - 1) ? (n - 1) : (lb + items_per_thread - 1);
-
-        for (size_t i = lb; i <= ub; ++i) {
-            for (size_t j = 0; j < n; ++j) {
-                a[idx(i,j,n)] = 1.0;
-            }
-            a[idx(i,i,n)] = 2.0;
-            b[i] = n + 1.0;
-            x[i] = 0.0;
+    #pragma omp parallel for
+    for (int i = 0; i < n; ++i) {
+        double* row = &a[i * n];
+        for (int j = 0; j < n; ++j) {
+            row[j] = 1.0;
         }
+        row[i] = 2.0;
+        b[i] = n + 1.0;
+        x[i] = 0.0;
     }
-
+    
     const auto start{std::chrono::steady_clock::now()};
 
-    slae_iter_omp(a, x, b, n, t, e, threads_num);
+    slae(a, x, b, n, t, e);
 
     const auto end{std::chrono::steady_clock::now()};
     const std::chrono::duration<double> elapsed_seconds(end - start);
@@ -104,46 +156,40 @@ double run_parallel(size_t n, int threads_num) {
     return elapsed_seconds.count();
 }
 
-double benchmark(size_t n, int tests_num, int threads_num) {
 
-    std::vector<double> time(tests_num);
-    for (size_t i = 0; i < tests_num; ++i) {
-        double t = run_parallel(n, threads_num);
-        time.push_back(t);
-    }
-    std::sort(time.begin(), time.end());
-    time.erase(time.begin(), time.begin() + tests_num/10); // delete lower 10%
-    time.erase(time.end() - tests_num/10, time.end());; // delete higher 10%
+void benchmark(
+    int data_size, 
+    int tests_num, 
+    const std::vector<int>& test_threads, 
+    Slae slae, 
+    std::string output_file_name
+) {
 
-    double sum = std::accumulate(time.begin(), time.end(), 0.0);
-    return sum / time.size();
-}
-
-int main(int argc, char** argv) {
-
-    const int n = 1000;
-    const int tests_num = 10; // for each thread
-    std::vector<int> test_threads{1,2,4,7,8,16,20,40}; // 1 - REQUIRED!
-
-    std::ofstream fout("slae_time.csv");
-    fout << std::fixed << std::setprecision(2);
-
+    std::ofstream fout(output_file_name);
     fout << "threads, "
-         << "time, "
-         << "acceleration" << std::endl;
+         << "time"      << std::endl;
 
-    double time1;
     for (int nthreads : test_threads) {
-        double time;
-
-        time = benchmark(n, tests_num, nthreads);
-        time1 = (nthreads == 1) ? time : time1;
-        fout << nthreads       << ", "
-             << time           << ", "
-             << time1/time << std::endl;
+        omp_set_num_threads(nthreads);
+        for (int t = 0; t < tests_num; ++t) {
+            double time = run_parallel(data_size, slae);
+            fout << nthreads << ", "
+                 << time     << std::endl;
+        }       
     }
 
     fout.close();
+}
+
+
+int main(int argc, char** argv) {
+
+    const int data_size = 10000;
+    const int tests_num = 100;
+    std::vector<int> test_threads{1,2,4,7,8,16,20,40};
+
+    benchmark(data_size, tests_num, test_threads, slae_single_block, "slae_single_block.csv");
+    benchmark(data_size, tests_num, test_threads, slae_multiple_blocks, "slae_multiple_blocks.csv");
 
     return 0;
 }
