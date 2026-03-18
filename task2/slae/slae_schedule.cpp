@@ -16,7 +16,7 @@ using Slae = void (*)(
 );
 
 
-void slae_static(
+void slae_static_k(
     const std::vector<double>& a, 
     std::vector<double>& x, 
     const std::vector<double>& b, 
@@ -222,7 +222,7 @@ double run_parallel(int n, int k, Slae slae) {
     double t = 1.0e-5;
     double e = 1.0e-5;
 
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for
     for (int i = 0; i < n; ++i) {
         double* row = &a[i * n];
         for (int j = 0; j < n; ++j) {
@@ -280,10 +280,10 @@ int main(int argc, char** argv) {
 
     const int data_size = 10000;
     const int tests_num = 100;
-    std::vector<int> test_threads{1,2,4,7,8,16,20,40};
-    std::vector<int> test_chunks{1,10,100,1000};
+    std::vector<int> test_threads{2,4,7,8,16,20,40};
+    std::vector<int> test_chunks{1,10,50,100,250};
 
-    benchmark(data_size, tests_num, test_threads, test_chunks, slae_static, "slae_static.csv");
+    benchmark(data_size, tests_num, test_threads, test_chunks, slae_static_k, "slae_static_k.csv");
     benchmark(data_size, tests_num, test_threads, test_chunks, slae_dynamic, "slae_dynamic.csv");
     benchmark(data_size, tests_num, test_threads, test_chunks, slae_guided, "slae_guided.csv");
 
