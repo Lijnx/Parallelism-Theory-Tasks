@@ -16,6 +16,7 @@ build
 
 #unignore specified files
 !*.cpp
+!*.hpp
 !*.h
 !*.c
 !*.py
