@@ -8,6 +8,7 @@
 .vscode
 build
 .venv
+log
 
 #uv
 !pyproject.toml
