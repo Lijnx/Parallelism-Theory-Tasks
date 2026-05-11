@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import logging
 import math
+import os
 import queue
 import signal
 import threading
@@ -138,6 +139,21 @@ def drain_latest(input_queue: queue.Queue[Any], previous: Any = None) -> Any:
             return value
 
 
+def check_camera_device_exists(camera: int | str) -> None:
+    if os.name != "posix":
+        return
+
+    if isinstance(camera, int):
+        device_path = Path(f"/dev/video{camera}")
+    else:
+        device_path = Path(camera)
+        if not str(device_path).startswith("/dev/video"):
+            return
+
+    if not device_path.exists():
+        raise CameraOpenError(f"Camera device does not exist: {device_path}")
+
+
 class Sensor:
     def __init__(
         self,
@@ -207,6 +223,10 @@ class SensorCam(Sensor):
         self.camera = camera
         self.resolution = resolution
         self.fps = fps
+        self.cap = None
+        self.closed = True
+
+        check_camera_device_exists(camera)
         self.cap = cv2.VideoCapture(camera)
         self.closed = False
 
@@ -242,6 +262,8 @@ class SensorCam(Sensor):
         super().__init__("SensorCam", output_queue, stop_event)
 
     def get(self) -> np.ndarray:
+        if self.cap is None:
+            raise CameraReadError("Camera is not initialized")
         ok, frame = self.cap.read()
         if not ok or frame is None:
             raise CameraReadError(
@@ -251,7 +273,8 @@ class SensorCam(Sensor):
 
     def close(self) -> None:
         if not getattr(self, "closed", True):
-            self.cap.release()
+            if self.cap is not None:
+                self.cap.release()
             self.closed = True
             logging.info("Camera released")
 
@@ -354,14 +377,9 @@ def compose_image(
     image = frame.copy()
     height, width = image.shape[:2]
     actual_width, actual_height = actual_resolution
-    panel_width = min(max(300, width // 3), width)
-    overlay = image.copy()
-    cv2.rectangle(overlay, (0, 0), (panel_width, height), (20, 20, 20), -1)
-    cv2.addWeighted(overlay, 0.65, image, 0.35, 0, image)
-
     lines = [
-        f"Camera FPS: {actual_fps:.2f}",
-        f"Camera resolution: {actual_width}x{actual_height}",
+        f"FPS: {actual_fps:.2f}",
+        f"Resolution: {actual_width}x{actual_height}",
         "",
     ]
 
@@ -374,22 +392,67 @@ def compose_image(
                 f"{sensor_name}: {value.value:+.3f} ({value.frequency_hz:g} Hz)"
             )
 
-    y = 32
+    margin = 12
+    padding_x = 14
+    padding_y = 12
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.52
+    thickness = 1
+    line_gap = 8
+    blank_gap = 12
+    max_panel_width = width - 2 * margin
+
+    visible_lines = [line for line in lines if line]
+    while font_scale > 0.35:
+        max_text_width = max(
+            cv2.getTextSize(line, font, font_scale, thickness)[0][0]
+            for line in visible_lines
+        )
+        if max_text_width + 2 * padding_x <= max_panel_width:
+            break
+        font_scale -= 0.04
+
+    text_sizes = {
+        line: cv2.getTextSize(line, font, font_scale, thickness)[0]
+        for line in visible_lines
+    }
+    line_height = max(text_height for _, text_height in text_sizes.values())
+    max_text_width = max(text_width for text_width, _ in text_sizes.values())
+
+    panel_width = min(max_panel_width, max_text_width + 2 * padding_x)
+    panel_height = 2 * padding_y
+    for line in lines:
+        panel_height += blank_gap if not line else line_height + line_gap
+    panel_height -= line_gap
+    panel_height = min(panel_height, height - 2 * margin)
+
+    x1 = margin
+    y1 = margin
+    x2 = x1 + panel_width
+    y2 = y1 + panel_height
+
+    overlay = image.copy()
+    cv2.rectangle(overlay, (x1, y1), (x2, y2), (18, 18, 18), -1)
+    cv2.addWeighted(overlay, 0.68, image, 0.32, 0, image)
+    cv2.rectangle(image, (x1, y1), (x2, y2), (80, 80, 80), 1)
+
+    x = x1 + padding_x
+    y = y1 + padding_y + line_height
     for line in lines:
         if not line:
-            y += 16
+            y += blank_gap
             continue
         cv2.putText(
             image,
             line,
-            (16, y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
+            (x, y),
+            font,
+            font_scale,
             (245, 245, 245),
-            1,
+            thickness,
             cv2.LINE_AA,
         )
-        y += 28
+        y += line_height + line_gap
 
     return image
 
@@ -492,8 +555,8 @@ def main() -> int:
         if failed_sensor is not None:
             raise SensorError(f"{failed_sensor.name} failed") from failed_sensor.error
 
-    except CameraOpenError:
-        logging.exception("Camera initialization failed")
+    except CameraOpenError as exc:
+        logging.error("Camera initialization failed: %s", exc)
         return 1
     except SensorError:
         logging.exception("Program stopped because of an unrecoverable error")
