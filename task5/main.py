@@ -15,7 +15,10 @@ import numpy as np
 
 MODEL_NAME = "yolov8s-pose.pt"
 WINDOW_NAME = "YOLOv8 Pose"
-QUEUE_SIZE = 32
+VIDEO_QUEUE_SIZE = 4
+REALTIME_CAPTURE_QUEUE_SIZE = 1
+REALTIME_INPUT_QUEUE_SIZE = 2
+REALTIME_OUTPUT_QUEUE_SIZE = 4
 CAMERA_INDEX = 0
 
 
@@ -160,6 +163,54 @@ def should_stop_display(frame: np.ndarray) -> bool:
     return key in (27, ord("q"))
 
 
+def put_latest_frame(
+    frame_queue: queue.Queue[np.ndarray | BaseException | None],
+    item: np.ndarray | BaseException | None,
+) -> None:
+    while True:
+        try:
+            frame_queue.put_nowait(item)
+            return
+        except queue.Full:
+            try:
+                frame_queue.get_nowait()
+            except queue.Empty:
+                pass
+
+
+def put_realtime_task(
+    input_queue: queue.Queue[FrameTask | None],
+    task: FrameTask | None,
+    dropped_frame_ids: set[int],
+    dropped_lock: threading.Lock,
+) -> None:
+    while True:
+        try:
+            input_queue.put_nowait(task)
+            return
+        except queue.Full:
+            try:
+                removed = input_queue.get_nowait()
+            except queue.Empty:
+                continue
+            if removed is not None:
+                with dropped_lock:
+                    dropped_frame_ids.add(removed.frame_id)
+
+
+def skip_dropped_frame_ids(
+    next_frame_id: int,
+    dropped_frame_ids: set[int],
+    dropped_lock: threading.Lock,
+) -> int:
+    while True:
+        with dropped_lock:
+            if next_frame_id not in dropped_frame_ids:
+                return next_frame_id
+            dropped_frame_ids.remove(next_frame_id)
+        next_frame_id += 1
+
+
 def process_video_single(input_path: str, output_path: str) -> float:
     capture = open_video_capture(input_path)
     writer: cv2.VideoWriter | None = None
@@ -225,12 +276,21 @@ def consume_ordered_results(
     output_queue: queue.Queue[FrameResult | BaseException | None],
     worker_count: int,
     handle_frame: Any,
+    dropped_frame_ids: set[int] | None = None,
+    dropped_lock: threading.Lock | None = None,
 ) -> None:
     next_frame_id = 0
     buffered: dict[int, np.ndarray] = {}
     finished_workers = 0
 
     while finished_workers < worker_count:
+        if dropped_frame_ids is not None and dropped_lock is not None:
+            next_frame_id = skip_dropped_frame_ids(
+                next_frame_id,
+                dropped_frame_ids,
+                dropped_lock,
+            )
+
         item = output_queue.get()
         if item is None:
             finished_workers += 1
@@ -244,14 +304,20 @@ def consume_ordered_results(
             if handle_frame(frame):
                 return
             next_frame_id += 1
+            if dropped_frame_ids is not None and dropped_lock is not None:
+                next_frame_id = skip_dropped_frame_ids(
+                    next_frame_id,
+                    dropped_frame_ids,
+                    dropped_lock,
+                )
 
 
 def run_video_multi_pass(input_path: str, output_path: str | None, worker_count: int) -> float:
     capture = open_video_capture(input_path)
     writer: cv2.VideoWriter | None = None
-    input_queue: queue.Queue[FrameTask | None] = queue.Queue(maxsize=QUEUE_SIZE)
+    input_queue: queue.Queue[FrameTask | None] = queue.Queue(maxsize=VIDEO_QUEUE_SIZE)
     output_queue: queue.Queue[FrameResult | BaseException | None] = queue.Queue(
-        maxsize=QUEUE_SIZE
+        maxsize=VIDEO_QUEUE_SIZE
     )
     started = time.perf_counter()
 
@@ -304,15 +370,42 @@ def process_video_multi(input_path: str, output_path: str, worker_count: int) ->
 
 def process_realtime_single() -> None:
     capture = open_video_capture(CAMERA_INDEX)
+    capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    frame_queue: queue.Queue[np.ndarray | BaseException | None] = queue.Queue(
+        maxsize=REALTIME_CAPTURE_QUEUE_SIZE
+    )
+    stop_event = threading.Event()
+
+    def capture_latest_frame() -> None:
+        try:
+            while not stop_event.is_set():
+                ok, frame = capture.read()
+                if not ok:
+                    put_latest_frame(
+                        frame_queue,
+                        PipelineError("Could not read a frame from the camera."),
+                    )
+                    stop_event.set()
+                    return
+                put_latest_frame(frame_queue, frame)
+        finally:
+            put_latest_frame(frame_queue, None)
+
+    reader = threading.Thread(target=capture_latest_frame, daemon=True, name="reader")
+
     try:
         YOLO = load_yolo_class()
         model = YOLO(MODEL_NAME)
         fps_counter = FpsCounter()
+        reader.start()
 
-        while True:
-            ok, frame = capture.read()
-            if not ok:
-                raise PipelineError("Could not read a frame from the camera.")
+        while not stop_event.is_set():
+            item = frame_queue.get()
+            if item is None:
+                break
+            if isinstance(item, BaseException):
+                raise item
+            frame = item
             annotated = annotate_frame(model, frame)
             fps = fps_counter.tick()
             cv2.putText(
@@ -326,20 +419,28 @@ def process_realtime_single() -> None:
                 cv2.LINE_AA,
             )
             if should_stop_display(annotated):
+                stop_event.set()
                 break
     finally:
+        stop_event.set()
         capture.release()
+        reader.join(timeout=2.0)
         cv2.destroyAllWindows()
 
 
 def process_realtime_multi(worker_count: int) -> None:
     configure_multi_runtime()
     capture = open_video_capture(CAMERA_INDEX)
-    input_queue: queue.Queue[FrameTask | None] = queue.Queue(maxsize=QUEUE_SIZE)
+    capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    input_queue: queue.Queue[FrameTask | None] = queue.Queue(
+        maxsize=REALTIME_INPUT_QUEUE_SIZE
+    )
     output_queue: queue.Queue[FrameResult | BaseException | None] = queue.Queue(
-        maxsize=QUEUE_SIZE
+        maxsize=REALTIME_OUTPUT_QUEUE_SIZE
     )
     stop_event = threading.Event()
+    dropped_frame_ids: set[int] = set()
+    dropped_lock = threading.Lock()
 
     def realtime_reader() -> None:
         frame_id = 0
@@ -348,12 +449,18 @@ def process_realtime_multi(worker_count: int) -> None:
                 ok, frame = capture.read()
                 if not ok:
                     output_queue.put(PipelineError("Could not read a frame from the camera."))
+                    stop_event.set()
                     return
-                input_queue.put(FrameTask(frame_id=frame_id, frame=frame))
+                put_realtime_task(
+                    input_queue,
+                    FrameTask(frame_id=frame_id, frame=frame),
+                    dropped_frame_ids,
+                    dropped_lock,
+                )
                 frame_id += 1
         finally:
             for _ in range(worker_count):
-                input_queue.put(None)
+                put_realtime_task(input_queue, None, dropped_frame_ids, dropped_lock)
 
     reader = threading.Thread(target=realtime_reader, daemon=True, name="reader")
     workers = [
@@ -390,7 +497,13 @@ def process_realtime_multi(worker_count: int) -> None:
                 stop_event.set()
             return stop
 
-        consume_ordered_results(output_queue, worker_count, handle_frame)
+        consume_ordered_results(
+            output_queue,
+            worker_count,
+            handle_frame,
+            dropped_frame_ids,
+            dropped_lock,
+        )
     finally:
         stop_event.set()
         capture.release()
