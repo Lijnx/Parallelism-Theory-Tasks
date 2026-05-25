@@ -24,6 +24,7 @@ struct Options {
     int size = 512;
     double eps = 1e-6;
     int max_iters = 1000000;
+    int check_every = 100;
     int runs = 3;
     std::vector<int> bench_sizes = {128, 256, 512, 1024};
     std::vector<std::string> modes = {"serial", "openacc"};
@@ -114,12 +115,13 @@ static void configure_openacc_device(const std::string& device) {
     } else if (d == "gpu" || d == "nvidia") {
         acc_set_device_type(acc_device_nvidia);
     }
+    acc_init(acc_get_device_type());
 #else
     (void)d;
 #endif
 }
 
-static SolveResult solve_serial(int n, double eps, int max_iters, bool keep_grid) {
+static SolveResult solve_serial(int n, double eps, int max_iters, int check_every, bool keep_grid) {
     std::vector<double> grid;
     std::vector<double> next;
     init_grid(grid, n);
@@ -130,14 +132,25 @@ static SolveResult solve_serial(int n, double eps, int max_iters, bool keep_grid
     const auto t0 = std::chrono::steady_clock::now();
 
     while (iter < max_iters && err > eps) {
-        err = 0.0;
-        for (int row = 1; row < n - 1; ++row) {
-            for (int col = 1; col < n - 1; ++col) {
-                const double value =
-                    0.25 * (grid[at(row - 1, col, n)] + grid[at(row + 1, col, n)] +
-                            grid[at(row, col - 1, n)] + grid[at(row, col + 1, n)]);
-                next[at(row, col, n)] = value;
-                err = std::max(err, std::fabs(value - grid[at(row, col, n)]));
+        const bool check_error = ((iter + 1) % check_every == 0) || (iter + 1 == max_iters);
+        if (check_error) {
+            err = 0.0;
+            for (int row = 1; row < n - 1; ++row) {
+                for (int col = 1; col < n - 1; ++col) {
+                    const double value =
+                        0.25 * (grid[at(row - 1, col, n)] + grid[at(row + 1, col, n)] +
+                                grid[at(row, col - 1, n)] + grid[at(row, col + 1, n)]);
+                    next[at(row, col, n)] = value;
+                    err = std::max(err, std::fabs(value - grid[at(row, col, n)]));
+                }
+            }
+        } else {
+            for (int row = 1; row < n - 1; ++row) {
+                for (int col = 1; col < n - 1; ++col) {
+                    next[at(row, col, n)] =
+                        0.25 * (grid[at(row - 1, col, n)] + grid[at(row + 1, col, n)] +
+                                grid[at(row, col - 1, n)] + grid[at(row, col + 1, n)]);
+                }
             }
         }
 
@@ -160,7 +173,8 @@ static SolveResult solve_serial(int n, double eps, int max_iters, bool keep_grid
     return result;
 }
 
-static SolveResult solve_openacc(int n, double eps, int max_iters, const std::string& device, bool keep_grid) {
+static SolveResult solve_openacc(int n, double eps, int max_iters, int check_every,
+                                 const std::string& device, bool keep_grid) {
     configure_openacc_device(device);
 
     std::vector<double> grid;
@@ -176,21 +190,33 @@ static SolveResult solve_openacc(int n, double eps, int max_iters, const std::st
     double err = 1.0;
     const auto t0 = std::chrono::steady_clock::now();
 
-    #pragma acc data copy(a[0:sz], b[0:sz])
+    #pragma acc data copy(a[0:sz]) create(b[0:sz])
     {
         while (iter < max_iters && err > eps) {
-            err = 0.0;
+            const bool check_error = ((iter + 1) % check_every == 0) || (iter + 1 == max_iters);
 
-            #pragma acc parallel loop collapse(2) reduction(max:err)
-            for (int row = 1; row < n - 1; ++row) {
-                for (int col = 1; col < n - 1; ++col) {
-                    const std::size_t idx = static_cast<std::size_t>(row) * n + col;
-                    const double value =
-                        0.25 * (a[idx - n] + a[idx + n] + a[idx - 1] + a[idx + 1]);
-                    b[idx] = value;
-                    const double diff = std::fabs(value - a[idx]);
-                    if (diff > err) {
-                        err = diff;
+            if (check_error) {
+                err = 0.0;
+
+                #pragma acc parallel loop collapse(2) reduction(max:err)
+                for (int row = 1; row < n - 1; ++row) {
+                    for (int col = 1; col < n - 1; ++col) {
+                        const std::size_t idx = static_cast<std::size_t>(row) * n + col;
+                        const double value =
+                            0.25 * (a[idx - n] + a[idx + n] + a[idx - 1] + a[idx + 1]);
+                        b[idx] = value;
+                        const double diff = std::fabs(value - a[idx]);
+                        if (diff > err) {
+                            err = diff;
+                        }
+                    }
+                }
+            } else {
+                #pragma acc parallel loop collapse(2)
+                for (int row = 1; row < n - 1; ++row) {
+                    for (int col = 1; col < n - 1; ++col) {
+                        const std::size_t idx = static_cast<std::size_t>(row) * n + col;
+                        b[idx] = 0.25 * (a[idx - n] + a[idx + n] + a[idx - 1] + a[idx + 1]);
                     }
                 }
             }
@@ -219,13 +245,13 @@ static SolveResult solve_openacc(int n, double eps, int max_iters, const std::st
 }
 
 static SolveResult solve(const std::string& mode, int n, double eps, int max_iters,
-                         const std::string& device, bool keep_grid) {
+                         int check_every, const std::string& device, bool keep_grid) {
     const std::string m = lower(mode);
     if (m == "serial" || m == "baseline") {
-        return solve_serial(n, eps, max_iters, keep_grid);
+        return solve_serial(n, eps, max_iters, check_every, keep_grid);
     }
     if (m == "openacc" || m == "acc") {
-        return solve_openacc(n, eps, max_iters, device, keep_grid);
+        return solve_openacc(n, eps, max_iters, check_every, device, keep_grid);
     }
     throw std::invalid_argument("Unknown mode: " + mode);
 }
@@ -263,6 +289,8 @@ static po::options_description make_description(Options& opt) {
             "Convergence threshold")
         ("iters,i", po::value<int>(&opt.max_iters)->default_value(opt.max_iters),
             "Max iterations")
+        ("check-every", po::value<int>(&opt.check_every)->default_value(opt.check_every),
+            "Check convergence every N iterations; use 1 for the original strict check")
         ("runs,r", po::value<int>(&opt.runs)->default_value(opt.runs),
             "Runs per size in benchmark mode")
         ("sizes", po::value<std::vector<int>>(&opt.bench_sizes)->multitoken(),
@@ -303,6 +331,9 @@ static Options parse_args(int argc, char** argv) {
     if (opt.max_iters < 1) {
         throw std::invalid_argument("Max iterations must be positive.");
     }
+    if (opt.check_every < 1) {
+        throw std::invalid_argument("Check interval must be positive.");
+    }
     if (opt.eps <= 0.0) {
         throw std::invalid_argument("Epsilon must be positive.");
     }
@@ -316,11 +347,13 @@ static void write_benchmark(const Options& opt) {
         throw std::runtime_error("Cannot open CSV file: " + opt.csv);
     }
 
-    csv << "mode,device,size,run,time_sec,iterations,error,eps,max_iters\n";
+    csv << "mode,device,size,run,time_sec,iterations,error,eps,max_iters,check_every\n";
+    csv.flush();
     for (const std::string& mode : opt.modes) {
         for (int n : opt.bench_sizes) {
             for (int run = 1; run <= opt.runs; ++run) {
-                const SolveResult result = solve(mode, n, opt.eps, opt.max_iters, opt.device, false);
+                const SolveResult result = solve(mode, n, opt.eps, opt.max_iters,
+                                                 opt.check_every, opt.device, false);
                 csv << lower(mode) << ','
                     << (lower(mode) == "openacc" ? device_label(opt.device) : "cpu-onecore") << ','
                     << n << ','
@@ -329,7 +362,12 @@ static void write_benchmark(const Options& opt) {
                     << result.iterations << ','
                     << std::scientific << std::setprecision(6) << result.error << std::defaultfloat << ','
                     << opt.eps << ','
-                    << opt.max_iters << '\n';
+                    << opt.max_iters << ','
+                    << opt.check_every << '\n';
+                csv.flush();
+                if (!csv) {
+                    throw std::runtime_error("Failed to write benchmark CSV: " + opt.csv);
+                }
 
                 std::cout << "mode=" << mode
                           << " device=" << (lower(mode) == "openacc" ? device_label(opt.device) : "cpu-onecore")
@@ -337,6 +375,7 @@ static void write_benchmark(const Options& opt) {
                           << " run=" << run
                           << " time=" << std::fixed << std::setprecision(4) << result.seconds << "s"
                           << " iters=" << result.iterations
+                          << " check_every=" << opt.check_every
                           << " err=" << std::scientific << std::setprecision(3) << result.error
                           << std::defaultfloat << '\n';
             }
@@ -361,13 +400,15 @@ int main(int argc, char** argv) {
         }
 
         const bool keep_grid = !opt.save.empty();
-        const SolveResult result = solve(opt.mode, opt.size, opt.eps, opt.max_iters, opt.device, keep_grid);
+        const SolveResult result = solve(opt.mode, opt.size, opt.eps, opt.max_iters,
+                                         opt.check_every, opt.device, keep_grid);
 
         std::cout << "mode=" << opt.mode
                   << " device=" << (lower(opt.mode) == "openacc" ? device_label(opt.device) : "cpu-onecore")
                   << " size=" << opt.size
                   << " time=" << std::fixed << std::setprecision(6) << result.seconds << "s"
                   << " iterations=" << result.iterations
+                  << " check_every=" << opt.check_every
                   << " error=" << std::scientific << std::setprecision(3) << result.error
                   << std::defaultfloat << '\n';
 
