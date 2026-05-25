@@ -15,11 +15,11 @@ set(OPENACC_TARGET "gpu" CACHE STRING "NVIDIA HPC SDK OpenACC target: gpu, multi
 set_property(CACHE OPENACC_TARGET PROPERTY STRINGS gpu multicore host)
 
 if(ENABLE_OPENACC)
-    target_compile_options(heat2d PRIVATE -acc=${OPENACC_TARGET} -Minfo=accel)
+    target_compile_options(heat2d PRIVATE -acc=${OPENACC_TARGET} -Minfo=all)
     target_link_options(heat2d PRIVATE -acc=${OPENACC_TARGET})
 endif()
 
-target_compile_options(heat2d PRIVATE -O2)
+target_compile_options(heat2d PRIVATE -O3)
 
 message(STATUS "OpenACC enabled: ${ENABLE_OPENACC}")
 message(STATUS "OpenACC target:  ${OPENACC_TARGET}")
