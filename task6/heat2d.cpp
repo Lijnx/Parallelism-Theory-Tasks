@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <utility>
 
 #include <boost/program_options.hpp>
 
@@ -24,7 +25,7 @@ struct Options {
     int size = 512;
     double eps = 1e-6;
     int max_iters = 1000000;
-    int check_every = 100;
+    int check_every = 1000;
     int runs = 3;
     std::vector<int> bench_sizes = {128, 256, 512, 1024};
     std::vector<std::string> modes = {"serial", "openacc"};
@@ -176,20 +177,20 @@ static SolveResult solve_serial(int n, double eps, int max_iters, int check_ever
 static SolveResult solve_openacc(int n, double eps, int max_iters, int check_every,
                                  const std::string& device, bool keep_grid) {
     configure_openacc_device(device);
-
-    std::vector<double> grid;
-    std::vector<double> next;
+    const std::size_t sz = static_cast<std::size_t>(n) * n;
+    std::vector<double> grid(sz, 0.0);
+    std::vector<double> next(sz, 0.0);
     init_grid(grid, n);
     init_grid(next, n);
 
     double* a = grid.data();
     double* b = next.data();
-    [[maybe_unused]] const std::size_t sz = static_cast<std::size_t>(n) * n;
 
     int iter = 0;
     double err = 1.0;
     const auto t0 = std::chrono::steady_clock::now();
 
+    // Один раз выделяем память на GPU
     #pragma acc data copy(a[0:sz]) create(b[0:sz])
     {
         while (iter < max_iters && err > eps) {
@@ -197,22 +198,19 @@ static SolveResult solve_openacc(int n, double eps, int max_iters, int check_eve
 
             if (check_error) {
                 err = 0.0;
-
-                #pragma acc parallel loop collapse(2) reduction(max:err)
+                // Ядро 1: Вычисление + сбор максимальной ошибки
+                #pragma acc parallel loop collapse(2) reduction(max:err) present(a[0:sz], b[0:sz])
                 for (int row = 1; row < n - 1; ++row) {
                     for (int col = 1; col < n - 1; ++col) {
                         const std::size_t idx = static_cast<std::size_t>(row) * n + col;
-                        const double value =
-                            0.25 * (a[idx - n] + a[idx + n] + a[idx - 1] + a[idx + 1]);
-                        b[idx] = value;
-                        const double diff = std::fabs(value - a[idx]);
-                        if (diff > err) {
-                            err = diff;
-                        }
+                        b[idx] = 0.25 * (a[idx - n] + a[idx + n] + a[idx - 1] + a[idx + 1]);
+                        const double diff = std::fabs(b[idx] - a[idx]);
+                        if (diff > err) err = diff;
                     }
                 }
             } else {
-                #pragma acc parallel loop collapse(2)
+                // Ядро 2: Только вычисление (без редукции)
+                #pragma acc parallel loop collapse(2) present(a[0:sz], b[0:sz])
                 for (int row = 1; row < n - 1; ++row) {
                     for (int col = 1; col < n - 1; ++col) {
                         const std::size_t idx = static_cast<std::size_t>(row) * n + col;
@@ -221,14 +219,8 @@ static SolveResult solve_openacc(int n, double eps, int max_iters, int check_eve
                 }
             }
 
-            #pragma acc parallel loop collapse(2)
-            for (int row = 1; row < n - 1; ++row) {
-                for (int col = 1; col < n - 1; ++col) {
-                    const std::size_t idx = static_cast<std::size_t>(row) * n + col;
-                    a[idx] = b[idx];
-                }
-            }
-
+            // КРИТИЧЕСКИ ВАЖНО: меняем указатели, а не копируем данные
+            std::swap(a, b);
             ++iter;
         }
     }
