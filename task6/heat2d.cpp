@@ -141,11 +141,7 @@ static SolveResult solve_serial(int n, double eps, int max_iters, bool keep_grid
             }
         }
 
-        for (int row = 1; row < n - 1; ++row) {
-            for (int col = 1; col < n - 1; ++col) {
-                grid[at(row, col, n)] = next[at(row, col, n)];
-            }
-        }
+        std::swap(grid, next);
         ++iter;
     }
 
@@ -176,12 +172,12 @@ static SolveResult solve_openacc(int n, double eps, int max_iters, const std::st
     double err = 1.0;
     const auto t0 = std::chrono::steady_clock::now();
 
-    #pragma acc data copy(a[0:sz], b[0:sz])
+    #pragma acc data copyin(a[0:sz], b[0:sz])
     {
         while (iter < max_iters && err > eps) {
             err = 0.0;
 
-            #pragma acc parallel loop collapse(2) reduction(max:err)
+            #pragma acc parallel loop collapse(2) present(a[0:sz], b[0:sz]) reduction(max:err)
             for (int row = 1; row < n - 1; ++row) {
                 for (int col = 1; col < n - 1; ++col) {
                     const std::size_t idx = static_cast<std::size_t>(row) * n + col;
@@ -195,15 +191,12 @@ static SolveResult solve_openacc(int n, double eps, int max_iters, const std::st
                 }
             }
 
-            #pragma acc parallel loop collapse(2)
-            for (int row = 1; row < n - 1; ++row) {
-                for (int col = 1; col < n - 1; ++col) {
-                    const std::size_t idx = static_cast<std::size_t>(row) * n + col;
-                    a[idx] = b[idx];
-                }
-            }
-
+            std::swap(a, b);
             ++iter;
+        }
+
+        if (keep_grid) {
+            #pragma acc update self(a[0:sz])
         }
     }
 
@@ -213,7 +206,7 @@ static SolveResult solve_openacc(int n, double eps, int max_iters, const std::st
     result.iterations = iter;
     result.error = err;
     if (keep_grid) {
-        result.grid = std::move(grid);
+        result.grid = (a == grid.data()) ? std::move(grid) : std::move(next);
     }
     return result;
 }
@@ -247,6 +240,17 @@ static void save_grid(const std::string& filename, int n, const std::vector<doub
         }
         out << '\n';
     }
+}
+
+static void print_grid(int n, const std::vector<double>& grid) {
+    std::cout << std::fixed << std::setprecision(6);
+    for (int row = 0; row < n; ++row) {
+        for (int col = 0; col < n; ++col) {
+            std::cout << std::setw(12) << grid[at(row, col, n)];
+        }
+        std::cout << '\n';
+    }
+    std::cout << std::defaultfloat;
 }
 
 static po::options_description make_description(Options& opt) {
@@ -317,6 +321,7 @@ static void write_benchmark(const Options& opt) {
     }
 
     csv << "mode,device,size,run,time_sec,iterations,error,eps,max_iters\n";
+    csv.flush();
     for (const std::string& mode : opt.modes) {
         for (int n : opt.bench_sizes) {
             for (int run = 1; run <= opt.runs; ++run) {
@@ -330,6 +335,10 @@ static void write_benchmark(const Options& opt) {
                     << std::scientific << std::setprecision(6) << result.error << std::defaultfloat << ','
                     << opt.eps << ','
                     << opt.max_iters << '\n';
+                csv.flush();
+                if (!csv) {
+                    throw std::runtime_error("Failed to write benchmark CSV: " + opt.csv);
+                }
 
                 std::cout << "mode=" << mode
                           << " device=" << (lower(mode) == "openacc" ? device_label(opt.device) : "cpu-onecore")
@@ -360,7 +369,8 @@ int main(int argc, char** argv) {
             return 0;
         }
 
-        const bool keep_grid = !opt.save.empty();
+        const bool print_small_grid = (opt.size == 10 || opt.size == 13);
+        const bool keep_grid = !opt.save.empty() || print_small_grid;
         const SolveResult result = solve(opt.mode, opt.size, opt.eps, opt.max_iters, opt.device, keep_grid);
 
         std::cout << "mode=" << opt.mode
@@ -372,8 +382,13 @@ int main(int argc, char** argv) {
                   << std::defaultfloat << '\n';
 
         if (keep_grid) {
-            save_grid(opt.save, opt.size, result.grid);
-            std::cout << "Grid saved to " << opt.save << '\n';
+            if (print_small_grid) {
+                print_grid(opt.size, result.grid);
+            }
+            if (!opt.save.empty()) {
+                save_grid(opt.save, opt.size, result.grid);
+                std::cout << "Grid saved to " << opt.save << '\n';
+            }
         }
     } catch (const std::exception& ex) {
         std::cerr << "Error: " << ex.what() << '\n';
