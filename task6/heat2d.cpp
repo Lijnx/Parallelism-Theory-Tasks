@@ -116,7 +116,7 @@ static void configure_openacc_device(const std::string& device) {
     } else if (d == "gpu" || d == "nvidia") {
         acc_set_device_type(acc_device_nvidia);
     }
-    // acc_init(acc_get_device_type());
+    acc_init(acc_get_device_type());
 #else
     (void)d;
 #endif
@@ -223,10 +223,6 @@ static SolveResult solve_openacc(int n, double eps, int max_iters, int check_eve
             std::swap(a, b);
             ++iter;
         }
-
-        if (keep_grid) {
-            #pragma acc update self(a[0:sz])
-        }
     }
 
     const auto t1 = std::chrono::steady_clock::now();
@@ -235,7 +231,7 @@ static SolveResult solve_openacc(int n, double eps, int max_iters, int check_eve
     result.iterations = iter;
     result.error = err;
     if (keep_grid) {
-        result.grid = (a == grid.data()) ? std::move(grid) : std::move(next);
+        result.grid = std::move(grid);
     }
     return result;
 }
@@ -269,17 +265,6 @@ static void save_grid(const std::string& filename, int n, const std::vector<doub
         }
         out << '\n';
     }
-}
-
-static void print_grid(int n, const std::vector<double>& grid) {
-    std::cout << std::fixed << std::setprecision(6);
-    for (int row = 0; row < n; ++row) {
-        for (int col = 0; col < n; ++col) {
-            std::cout << std::setw(12) << grid[at(row, col, n)];
-        }
-        std::cout << '\n';
-    }
-    std::cout << std::defaultfloat;
 }
 
 static po::options_description make_description(Options& opt) {
@@ -420,13 +405,8 @@ int main(int argc, char** argv) {
                   << std::defaultfloat << '\n';
 
         if (keep_grid) {
-            if (print_small_grid) {
-                print_grid(opt.size, result.grid);
-            }
-            if (!opt.save.empty()) {
-                save_grid(opt.save, opt.size, result.grid);
-                std::cout << "Grid saved to " << opt.save << '\n';
-            }
+            save_grid(opt.save, opt.size, result.grid);
+            std::cout << "Grid saved to " << opt.save << '\n';
         }
     } catch (const std::exception& ex) {
         std::cerr << "Error: " << ex.what() << '\n';
