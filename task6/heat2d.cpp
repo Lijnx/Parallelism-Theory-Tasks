@@ -115,7 +115,7 @@ static void configure_openacc_device(const std::string& device) {
     } else if (d == "gpu" || d == "nvidia") {
         acc_set_device_type(acc_device_nvidia);
     }
-    acc_init(acc_get_device_type());
+    // acc_init(acc_get_device_type());
 #else
     (void)d;
 #endif
